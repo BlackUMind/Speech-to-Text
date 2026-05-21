@@ -1,0 +1,209 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speech Translator</title>
+
+<style>
+body {
+  margin: 0;
+  font-family: Arial;
+  background: #111;
+  color: white;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.header {
+  padding: 15px;
+  text-align: center;
+  background: #1a1a1a;
+}
+
+.output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 15px;
+}
+
+.block { margin-bottom: 10px; }
+.ru { color: #ccc; }
+.fr { color: #00ffcc; font-size: 18px; }
+
+.controls {
+  padding: 20px;
+  display: flex;
+  justify-content: center;
+}
+
+button {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: none;
+  font-size: 30px;
+  cursor: pointer;
+}
+
+.start { background: #00c853; }
+.stop { background: #d50000; }
+
+.status {
+  text-align: center;
+  font-size: 14px;
+  color: #aaa;
+  padding-bottom: 10px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="header">🎤 Speech → FR</div>
+<div id="output" class="output"></div>
+<div class="status" id="status">Готов</div>
+
+<div class="controls">
+  <button id="btn" class="start">🎤</button>
+</div>
+
+<script>
+const API_KEY = "c116cba016303b5eb9de8d8c54ae56b4dd677fc1";
+
+let ws;
+let mediaRecorder;
+let stream;
+let recording = false;
+let broadcastWS;
+
+const isHost = location.hash === "#host";
+
+const btn = document.getElementById("btn");
+const status = document.getElementById("status");
+const output = document.getElementById("output");
+
+// перевод
+async function translate(text) {
+  const res = await fetch(
+    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=ru|fr`
+  );
+  const data = await res.json();
+  return data.responseData.translatedText;
+}
+
+// UI блок
+function addBlock(ru, fr) {
+  const div = document.createElement("div");
+  div.className = "block";
+  div.innerHTML = `<div class="ru">${ru}</div><div class="fr">${fr}</div>`;
+  output.appendChild(div);
+  output.scrollTop = output.scrollHeight;
+}
+
+// зритель
+if (!isHost) {
+  status.textContent = "👀 Viewer";
+
+  broadcastWS = new WebSocket("ws://192.168.0.131:3000");
+
+  broadcastWS.onmessage = (msg) => {
+    const data = JSON.parse(msg.data);
+    addBlock(data.ru, data.fr);
+  };
+}
+
+// кнопка
+btn.onclick = async () => {
+  if (!isHost) return;
+
+  if (!recording) {
+    start();
+  } else {
+    stop();
+  }
+};
+
+async function start() {
+  status.textContent = "🎤 включение микрофона...";
+
+  // 1. МИКРОФОН СРАЗУ
+  stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    .catch(err => {
+      alert("Нет микрофона");
+      console.error(err);
+      return null;
+    });
+
+  if (!stream) return;
+
+  // 2. UI СРАЗУ МЕНЯЕМ (ВАЖНО)
+  recording = true;
+  btn.classList.remove("start");
+  btn.classList.add("stop");
+  btn.textContent = "⛔";
+
+  status.textContent = "🎤 работает...";
+
+  // 3. broadcast сразу
+  broadcastWS = new WebSocket("ws://192.168.0.131:3000");
+
+  // 4. Deepgram
+  ws = new WebSocket(
+    "wss://api.deepgram.com/v1/listen?language=ru",
+    ["token", API_KEY]
+  );
+
+  ws.onopen = () => {
+    mediaRecorder = new MediaRecorder(stream);
+
+    mediaRecorder.ondataavailable = async (e) => {
+      if (e.data.size > 0 && ws.readyState === 1) {
+        const buf = await e.data.arrayBuffer();
+        ws.send(buf);
+      }
+    };
+
+    mediaRecorder.start(300);
+  };
+
+  ws.onmessage = async (msg) => {
+    const data = JSON.parse(msg.data);
+    const text = data.channel?.alternatives?.[0]?.transcript;
+
+    if (!text) return;
+
+    const fr = await translate(text);
+
+    addBlock(text, fr);
+
+    if (broadcastWS.readyState === 1) {
+      broadcastWS.send(JSON.stringify({ ru: text, fr }));
+    }
+  };
+
+  ws.onerror = () => {
+    status.textContent = "⚠️ ошибка сервиса";
+  };
+}
+
+function stop() {
+  recording = false;
+
+  mediaRecorder?.stop();
+  stream?.getTracks().forEach(t => t.stop());
+  ws?.close();
+  broadcastWS?.close();
+
+  btn.classList.remove("stop");
+  btn.classList.add("start");
+  btn.textContent = "🎤";
+
+  status.textContent = "⛔ остановлено";
+}
+</script>
+
+</body>
+</html>
